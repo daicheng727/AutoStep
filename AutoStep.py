@@ -1,16 +1,17 @@
 # -*- coding: utf8 -*-
-import math
-import traceback
-from datetime import datetime
-import pytz
-
 import json
+import math
+import os
 import random
 import re
 import time
-import os
+import traceback
+import urllib
+from datetime import datetime
 
+import pytz
 import requests
+from Crypto.Cipher import AES
 
 
 # 获取北京时间
@@ -60,12 +61,21 @@ def get_access_token(location):
     return result[0]
 
 
+def encrypt_data(plain: bytes) -> bytes:
+    key = b'xeNtBVqzDc6tuNTh'  # 16 bytes
+    iv = b'MAAAYAAAAAAAAABg'  # 16 bytes
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    # AES-128-CBC 使用 PKCS#7 填充。
+    pad_len = AES.block_size - (len(plain) % AES.block_size)
+    padded = plain + bytes([pad_len]) * pad_len
+    return cipher.encrypt(padded)
+
+
 class MiMotionRunner:
     def __init__(self, _user, _passwd):
         user = str(_user)
         password = str(_passwd)
         self.invalid = False
-        self.log_str = ""
         if user == '' or password == '':
             self.error = "用户名或密码填写有误！"
             self.invalid = True
@@ -81,27 +91,39 @@ class MiMotionRunner:
             self.is_phone = False
         self.user = user
         self.fake_ip_addr = fake_ip()
-        self.log_str += f"创建虚拟ip地址：{self.fake_ip_addr}\n"
+        print(f"创建虚拟ip地址：{self.fake_ip_addr}\n")
 
     # 登录
     def login(self):
-
-        url1 = "https://api-user.huami.com/registrations/" + self.user + "/tokens"
-        login_headers = {
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2",
+        log_str = '登录成功'
+        headers = {
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "user-agent": "MiFit6.14.0 (M2007J1SC; Android 12; Density/2.75)",
+            "app_name": "com.xiaomi.hm.health",
+            "appname": "com.xiaomi.hm.health",
+            "appplatform": "android_phone",
+            "x-hm-ekv": "1",
+            "hm-privacy-ceip": "false",
             "X-Forwarded-For": self.fake_ip_addr
         }
-        data1 = {
-            "client_id": "HuaMi",
-            "password": f"{self.password}",
-            "redirect_uri": "https://s3-us-west-2.amazonaws.com/hm-registration/successsignin.html",
-            "token": "access"
+
+        login_data = {
+            'emailOrPhone': self.user,
+            'password': self.password,
+            'state': 'REDIRECTION',
+            'client_id': 'HuaMi',
+            'country_code': 'CN',
+            'token': 'access',
+            'redirect_uri': 'https://s3-us-west-2.amazonaws.com/hm-registration/successsignin.html',
         }
-        r1 = requests.post(url1, data=data1, headers=login_headers, allow_redirects=False)
-        if r1.status_code != 303:
-            self.log_str += "登录异常，status: %d\n" % r1.status_code
-            return 0, 0
+        # 等同 http_build_query，默认使用 quote_plus 将空格转为 '+'
+        query = urllib.parse.urlencode(login_data)
+        plaintext = query.encode('utf-8')
+        # 执行请求加密
+        cipher_data = encrypt_data(plaintext)
+
+        url1 = 'https://api-user.zepp.com/v2/registrations/tokens'
+        r1 = requests.post(url1, data=cipher_data, headers=headers, allow_redirects=False)
         location = r1.headers["Location"]
         try:
             code = get_access_token(location)
@@ -111,6 +133,8 @@ class MiMotionRunner:
         except:
             self.log_str += f"获取accessToken异常:{traceback.format_exc()}\n"
             return 0, 0
+        # print("access_code获取成功！")
+        # print(code)
 
         url2 = "https://account.huami.com/v2/client/login"
         if self.is_phone:
@@ -140,11 +164,15 @@ class MiMotionRunner:
                 "source": "com.xiaomi.hm.health",
                 "third_name": "email",
             }
-        r2 = requests.post(url2, data=data2, headers=login_headers).json()
+        r2 = requests.post(url2, data=data2, headers=headers).json()
         login_token = r2["token_info"]["login_token"]
+        # print("login_token获取成功！")
+        # print(login_token)
         userid = r2["token_info"]["user_id"]
+        # print("userid获取成功！")
+        # print(userid)
 
-        return login_token, userid
+        return login_token, userid, log_str
 
     # 获取app_token
     def get_app_token(self, login_token):
@@ -157,12 +185,12 @@ class MiMotionRunner:
     # 主函数
     def login_and_post_step(self, min_step, max_step):
         if self.invalid:
-            return "账号或密码配置有误", False
+            return "账号或密码配置有误", 0
         step = str(random.randint(min_step, max_step))
-        self.log_str += f"已设置为随机步数范围({min_step}~{max_step}) 随机值:{step}\n"
-        login_token, userid = self.login()
+        print(f"已设置为随机步数范围({min_step}~{max_step}) 随机值:{step}\n")
+        login_token, userid, message = self.login()
         if login_token == 0:
-            return "登陆失败！", False, 0
+            return message, 0
 
         t = get_time()
 
@@ -187,25 +215,21 @@ class MiMotionRunner:
         data = f'userid={userid}&last_sync_data_time=1597306380&device_type=0&last_deviceid=DA932FFFFE8816E7&data_json={data_json}'
 
         response = requests.post(url, data=data, headers=head).json()
-        return f"修改步数（{step}）[" + response['message'] + "]", True, step
+        return response['message'], step
 
 
 def run_single_account(user_mi, passwd_mi):
     log_str = f"[{format_now()}]\n账号：{desensitize_user_name(user_mi)}"
+    print(log_str)
     try:
         runner = MiMotionRunner(user_mi, passwd_mi)
-        exec_msg, success, step = runner.login_and_post_step(min_step, max_step)
-        log_str += runner.log_str
-        log_str += f'{exec_msg}\n'
-        exec_result = {"user": user_mi, "success": success, "msg": exec_msg}
-        send_message(user_mi, step, True, '')
-    except:
-        log_str += f"执行异常:{traceback.format_exc()}\n"
-        log_str += traceback.format_exc()
-        exec_result = {"user": user_mi, "success": False, "msg": f"执行异常:{traceback.format_exc()}"}
-        send_message(user_mi, 0, False, log_str)
-    print(log_str)
-    return exec_result
+        log_str, step = runner.login_and_post_step(min_step, max_step)
+        print(log_str)
+        send_message(user_mi, step, log_str)
+    except Exception as e:
+        log_str = f"执行异常:{e}\n"
+        print(log_str)
+        send_message(user_mi, 0, log_str)
 
 
 def get_wx_access_token():
@@ -213,12 +237,12 @@ def get_wx_access_token():
     url = 'https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={}&secret={}'.format(
         appID.strip(), appSecret.strip())
     response = requests.get(url).json()
-    print(response)
+    # print(response)
     access_token = response.get('access_token')
     return access_token
 
 
-def send_message(user_mi, step, success, log_str):
+def send_message(user_mi, step, log_str):
     body = {
         "touser": openId.strip(),
         "template_id": templateId.strip(),
@@ -234,21 +258,24 @@ def send_message(user_mi, step, success, log_str):
                 "value": step
             },
             "success": {
-                "value": "执行成功" if success else log_str
+                "value": log_str
             }
         }
     }
     url = 'https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={}'.format(get_wx_access_token())
-    print(requests.post(url, json.dumps(body)).text)
+    requests.post(url, json.dumps(body))
 
 
 if __name__ == "__main__":
     # 北京时间
     time_bj = get_beijing_time()
-    min_step = 29950
-    max_step = 29999
+    min_step = 20000
+    max_step = 21000
+    user_default = ''
     if os.environ.__contains__("USER_CONFIG") is False:
-        print("未配置USER_CONFIG变量，无法执行")
+        log_str = "未配置USER_CONFIG变量，无法执行"
+        print(log_str)
+        send_message(user_default, 0, log_str)
         exit(1)
     else:
         # region 初始化参数
@@ -272,9 +299,10 @@ if __name__ == "__main__":
                 appSecret = wx_config.get("APP_SECRET")
                 openId = wx_config.get("OPEN_ID")
                 templateId = wx_config.get("TEMPLATE_ID")
-        except:
-            print("CONFIG格式不正确，请检查Secret配置，请严格按照JSON格式：使用双引号包裹字段和值，逗号不能多也不能少")
-            traceback.print_exc()
+        except Exception as e:
+            log_str = "CONFIG格式不正确，请检查Secret配置，请严格按照JSON格式：使用双引号包裹字段和值，逗号不能多也不能少"
+            print(log_str)
+            send_message(user_default, 0, log_str)
             exit(1)
         users = user_config.get('USER')
         passwords = user_config.get('PWD')
@@ -283,3 +311,4 @@ if __name__ == "__main__":
             exit(1)
         # endregion
         run_single_account(users, passwords)
+    run_single_account(users, passwords)
