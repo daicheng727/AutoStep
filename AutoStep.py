@@ -190,7 +190,7 @@ class MiMotion():
 
             res_json = resp.json()
             if res_json.get('message') == 'success':
-                msg = "【success】"
+                msg = "【success】，请及时更新工会数据"
             else:
                 msg = f"【fail】{res_json}"
         except Exception as e:
