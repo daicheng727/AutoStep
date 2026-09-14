@@ -10,10 +10,6 @@ import requests
 
 from datetime import datetime
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 
 # 获取北京时间
 def get_beijing_time():
